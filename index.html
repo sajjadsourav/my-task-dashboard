@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Task Organizer & Timer</title>
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Task Organizer & Timer</title>
     <style>
         body {
             background-color: #121212; 
@@ -31,6 +31,7 @@
             display: flex;
             flex-direction: column;
             justify-content: center;
+            position: relative;
         }
         h1, h2 { margin-top: 0; }
         
@@ -87,6 +88,20 @@
         #finish-btn { background-color: #d13438; }
         #finish-btn:hover { background-color: #b02a2e; }
         
+        /* --- SKIP BUTTON STYLES --- */
+        #skip-btn {
+            background-color: transparent;
+            border: 1px solid #666;
+            color: #aaaaaa;
+            padding: 6px 16px;
+            font-size: 0.9rem;
+            border-radius: 20px;
+            margin: 15px auto 0 auto;
+            width: auto;
+            display: none; /* Hidden until task starts */
+        }
+        #skip-btn:hover { background-color: #333; color: #ffffff; border-color: #ffffff; }
+
         /* --- DASHBOARD & CALENDAR STYLES --- */
         .dashboard-grid {
             display: grid;
@@ -180,6 +195,7 @@
             </ul>
         </div>
 
+        <button id="skip-btn" onclick="skipPage()">⏭️ Next View</button>
         <div id="wake-status">Screen Wake Lock: Inactive 🌙 | Screensaver: Off</div>
     </div>
 
@@ -208,7 +224,6 @@
                 const response = await fetch(GOOGLE_SCRIPT_URL, { method: "GET", redirect: "follow" });
                 const payload = await response.json();
                 
-                // 1. RENDER SPREADSHEET STATS (Page 1)
                 const stats = payload.stats;
                 if (stats && Object.keys(stats).length > 0) {
                     const statsHTML = Object.keys(stats).map(key => `
@@ -222,29 +237,18 @@
                     document.getElementById('dashboard-stats').innerHTML = "<p>No stat data found.</p>";
                 }
 
-                // 2. RENDER CALENDAR EVENTS (Page 2)
                 const events = payload.events;
                 if (events && events.length > 0) {
-                    // Limit to the next 6 events so the screen isn't overwhelmed
                     const eventsHTML = events.slice(0, 6).map(ev => {
                         const dateObj = new Date(ev.startTime);
-                        // Format: Mon, Feb 16
                         const dayStr = dateObj.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-                        // Format: 10:00 AM (or 'All Day')
                         const timeStr = ev.isAllDay ? 'All Day' : dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                        
-                        return `
-                            <li>
-                                <span class="event-time">${dayStr} &bull; ${timeStr}</span><br>
-                                <span class="event-title">${ev.title}</span>
-                            </li>
-                        `;
+                        return `<li><span class="event-time">${dayStr} &bull; ${timeStr}</span><br><span class="event-title">${ev.title}</span></li>`;
                     }).join('');
                     document.getElementById('calendar-events-list').innerHTML = eventsHTML;
                 } else {
                     document.getElementById('calendar-events-list').innerHTML = "<li>No upcoming events in the next 7 days.</li>";
                 }
-
             } catch (error) {
                 console.error("Error fetching Dashboard data:", error);
                 document.getElementById('dashboard-stats').innerHTML = "<p>Could not load spreadsheet data.</p>";
@@ -254,10 +258,8 @@
 
         // --- WAKE LOCK LOGIC ---
         async function requestWakeLock() {
-            try {
-                wakeLock = await navigator.wakeLock.request('screen');
-                updateStatusText();
-            } catch (err) { console.error(`Wake Lock Error: ${err.name}, ${err.message}`); }
+            try { wakeLock = await navigator.wakeLock.request('screen'); updateStatusText(); } 
+            catch (err) { console.error(`Wake Lock Error: ${err.name}, ${err.message}`); }
         }
 
         document.addEventListener('visibilitychange', async () => {
@@ -266,20 +268,31 @@
             }
         });
 
-        // --- SCREENSAVER LOGIC ---
+        // --- SCREENSAVER & SKIP LOGIC ---
+        function cyclePage() {
+            document.getElementById(`page-${currentPageIndex}`).classList.remove('active');
+            currentPageIndex = (currentPageIndex + 1) % totalPages;
+            document.getElementById(`page-${currentPageIndex}`).classList.add('active');
+            document.body.style.backgroundColor = burnInColors[Math.floor(Math.random() * burnInColors.length)];
+        }
+
+        function skipPage() {
+            cyclePage();
+            // Reset the interval timer so it doesn't immediately skip again
+            clearInterval(screensaverInterval);
+            screensaverInterval = setInterval(cyclePage, 12000);
+        }
+
         function startScreensaver() {
             clearInterval(screensaverInterval);
-            screensaverInterval = setInterval(() => {
-                document.getElementById(`page-${currentPageIndex}`).classList.remove('active');
-                currentPageIndex = (currentPageIndex + 1) % totalPages;
-                document.getElementById(`page-${currentPageIndex}`).classList.add('active');
-                document.body.style.backgroundColor = burnInColors[Math.floor(Math.random() * burnInColors.length)];
-            }, 12000); 
+            document.getElementById('skip-btn').style.display = 'inline-block'; // Show the skip button
+            screensaverInterval = setInterval(cyclePage, 12000); 
             updateStatusText(true);
         }
 
         function stopScreensaver() {
             clearInterval(screensaverInterval);
+            document.getElementById('skip-btn').style.display = 'none'; // Hide the skip button
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             currentPageIndex = 0;
             document.getElementById('page-0').classList.add('active');
@@ -294,39 +307,18 @@
         }
 
         // --- ICS CALENDAR EXPORT LOGIC ---
-        function formatICSDate(date) {
-            return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-        }
+        function formatICSDate(date) { return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'; }
 
         function exportToICS() {
             const taskName = document.getElementById('task-name').value || "Focus Session";
             const category = document.getElementById('task-category').value;
             const minutes = parseInt(document.getElementById('minutes-input').value) || 60;
-            
             const startDate = new Date();
             const endDate = new Date(startDate.getTime() + minutes * 60000);
-            
             const dtStart = formatICSDate(startDate);
             const dtEnd = formatICSDate(endDate);
 
-            const icsContent = 
-`BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Your Web App//Task Organizer//EN
-BEGIN:VEVENT
-DTSTART:${dtStart}
-DTEND:${dtEnd}
-SUMMARY:${taskName}
-DESCRIPTION:Category: ${category}\\nScheduled via Task Organizer
-LOCATION:Cincinnati\\, OH
-STATUS:CONFIRMED
-BEGIN:VALARM
-TRIGGER:-PT5M
-ACTION:DISPLAY
-DESCRIPTION:Reminder
-END:VALARM
-END:VEVENT
-END:VCALENDAR`;
+            const icsContent = `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Your Web App//Task Organizer//EN\nBEGIN:VEVENT\nDTSTART:${dtStart}\nDTEND:${dtEnd}\nSUMMARY:${taskName}\nDESCRIPTION:Category: ${category}\\nScheduled via Task Organizer\nLOCATION:Cincinnati\\, OH\nSTATUS:CONFIRMED\nBEGIN:VALARM\nTRIGGER:-PT5M\nACTION:DISPLAY\nDESCRIPTION:Reminder\nEND:VALARM\nEND:VEVENT\nEND:VCALENDAR`;
 
             const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
             const link = document.createElement('a');
@@ -341,7 +333,6 @@ END:VCALENDAR`;
         function startNewTask() {
             const taskName = document.getElementById('task-name').value;
             if (!taskName) return alert("Please enter a task name.");
-
             const minutes = parseInt(document.getElementById('minutes-input').value);
             if (isNaN(minutes) || minutes <= 0) return alert("Please enter valid minutes.");
             
@@ -400,13 +391,7 @@ END:VCALENDAR`;
             const taskName = document.getElementById('task-name').value;
             const category = document.getElementById('task-category').value;
 
-            const payload = {
-                date: sessionDate,
-                startTime: sessionStartTime,
-                endTime: sessionEndTime,
-                taskName: taskName,
-                category: category
-            };
+            const payload = { date: sessionDate, startTime: sessionStartTime, endTime: sessionEndTime, taskName: taskName, category: category };
 
             const syncStatus = document.getElementById('sync-status');
             syncStatus.innerText = "Logging to Google Sheets... 🔄";
